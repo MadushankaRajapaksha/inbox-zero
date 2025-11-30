@@ -56,21 +56,32 @@ class ComposeModal(ModalScreen):
     ComposeModal {
         align: center middle;
     }
-    #compose-container {
+    #compose-scroll-container {
         width: 80%;
-        height: 80%;
+        max-height: 80%;
+        align: center middle;
+    }
+    #compose-container {
+        width: 100%;
+        height: auto;
         padding: 2;
         background: $panel;
         border: thick $primary;
+        layout: vertical;
     }
     #compose-header {
         width: 100%;
         text-align: center;
         padding-bottom: 1;
     }
+    #compose-to, #compose-subject {
+        width: 100%;
+        margin-bottom: 1;
+    }
     #compose-body {
         height: 1fr;
         width: 1fr;
+        margin-bottom: 1;
     }
     #compose-buttons {
         width: 100%;
@@ -79,14 +90,15 @@ class ComposeModal(ModalScreen):
     """
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="compose-container"):
-            yield Static("✍️ Compose New Email", id="compose-header")
-            yield Input(placeholder="To:", id="compose-to")
-            yield Input(placeholder="Subject:", id="compose-subject")
-            yield TextArea(placeholder="Body:", id="compose-body")
-            with Horizontal(id="compose-buttons"):
-                yield Button("Send", variant="primary", id="send-button")
-                yield Button("Cancel", id="cancel-button")
+        with ScrollableContainer(id="compose-scroll-container"):
+            with Vertical(id="compose-container"):
+                yield Static("✍️ Compose New Email", id="compose-header")
+                yield Input(placeholder="To:", id="compose-to")
+                yield Input(placeholder="Subject:", id="compose-subject")
+                yield TextArea(id="compose-body") # Removed placeholder, as it's not supported
+                with Horizontal(id="compose-buttons"):
+                    yield Button("Send", variant="primary", id="send-button")
+                    yield Button("Cancel", id="cancel-button")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "send-button":
@@ -98,6 +110,10 @@ class ComposeModal(ModalScreen):
 
 class NetworkErrorModal(ModalScreen):
     """A modal screen to display a network error."""
+
+    def __init__(self, error_message: str, **kwargs):
+        super().__init__(**kwargs)
+        self.error_message = error_message
 
     DEFAULT_CSS = """
     NetworkErrorModal {
@@ -127,17 +143,93 @@ class NetworkErrorModal(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="error-container"):
             yield Static("🔌 Network Error", id="error-title")
-            yield Static(
-                "Could not connect to the email server. "
-                "Please check your internet connection.",
-                id="error-message",
-            )
+            yield Static(self.error_message, id="error-message")
             yield Button("Retry", variant="error", id="retry-button")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "retry-button":
             self.app.pop_screen()
             self.app.action_refresh()
+
+
+class LoginScreen(Screen):
+    """A screen for user login."""
+
+    DEFAULT_CSS = """
+    LoginScreen {
+        align: center middle;
+    }
+
+    #login-container {
+        width: 50%;
+        max-height: 80%; /* Ensure scrollability */
+        align: center middle;
+        padding: 2;
+        background: $panel;
+        border: thick $primary;
+        layout: vertical;
+        overflow: auto; /* Make the container itself scrollable */
+    }
+
+    #login-title {
+        width: 100%;
+        text-align: center;
+        padding-bottom: 1;
+    }
+
+    #email-input, #password-input {
+        width: 100%;
+        margin-top: 1;
+        margin-bottom: 1;
+    }
+
+    #app-password-instructions {
+        margin-top: 1;
+        margin-bottom: 1;
+        padding: 0 1; /* Add some horizontal padding */
+        text-align: left; /* Align instructions text to left */
+    }
+
+    #login-buttons {
+        width: 100%;
+        margin-top: 1;
+    }
+    """
+    logo = r"""
+    ____      __              _____
+   /  _/___  / /_  ____  _  _/__  /  ___  _________
+   / // __ \/ __ \/ __ \| |/_/ / /  / _ \/ ___/ __ \
+ _/ // / / / /_/ / /_/ />  <  / /__/  __/ /  / /_/ /
+/___/_/ /_/_.___/\____/_/|_| /____/\___/_/   \____/
+                                                    
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="login-container"): # Removed outer ScrollableContainer
+            yield Static(self.logo, id="login-title")
+            yield Input(placeholder="Email Address", id="email-input")
+            yield Static(
+                "To log in, please generate a Google App Password:\n"
+                "1. Go to your Google Account (myaccount.google.com)\n"
+                "2. Navigate to 'Security'\n"
+                "3. Under 'How you sign in to Google', select 'App passwords'\n"
+                "4. Follow the instructions to generate a new app password\n"
+                "5. Use this generated password in the 'App Password' field below.",
+                id="app-password-instructions"
+            )
+            yield Input(placeholder="App Password", password=True, id="password-input")
+            with Horizontal(id="login-buttons"):
+                yield Button("Login", variant="primary", id="login-button")
+                yield Button("Quit", id="quit-button")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "login-button":
+            # Here you would typically handle the login logic,
+            # for now, we just restart the fetch loop.
+            self.app.pop_screen()
+            self.app.action_refresh()
+        elif event.button.id == "quit-button":
+            self.app.exit()
 
 
 class InboxZeroApp(App):
@@ -297,10 +389,11 @@ class InboxZeroApp(App):
 
         except AuthError as e:
             self.update_status(f"🔐 Authentication failed: {str(e)}")
-            self.notify(str(e), severity="error", timeout=5)
+            self.push_screen(LoginScreen())
         except Exception as e:
             error_msg = str(e)[:50]
             self.update_status(f"❌ Error: {error_msg}")
+            self.push_screen(NetworkErrorModal(f"Error fetching emails: {error_msg}"))
             self.log.error(f"Email fetch error: {e}")
         finally:
             self.is_loading = False
@@ -434,151 +527,3 @@ class InboxZeroApp(App):
             self.push_screen(ComposeModal())
 
 
-class NetworkErrorModal(ModalScreen):
-    """A modal screen to display a network error."""
-
-    DEFAULT_CSS = """
-    NetworkErrorModal {
-        align: center middle;
-    }
-    #error-container {
-        width: 50%;
-        height: auto;
-        padding: 2;
-        background: $error;
-        border: thick $error-darken-2;
-    }
-    #error-title {
-        width: 100%;
-        text-align: center;
-        padding-bottom: 1;
-    }
-    #error-message {
-        text-align: center;
-    }
-    #retry-button {
-        width: 100%;
-        margin-top: 1;
-    }
-    """
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="error-container"):
-            yield Static("🔌 Network Error", id="error-title")
-            yield Static(
-                "Could not connect to the email server. "
-                "Please check your internet connection.",
-                id="error-message",
-            )
-            yield Button("Retry", variant="error", id="retry-button")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "retry-button":
-            self.app.pop_screen()
-            self.app.action_refresh()
-
-
-class ComposeModal(ModalScreen):
-    """A modal screen to compose a new email."""
-
-    DEFAULT_CSS = """
-    ComposeModal {
-        align: center middle;
-    }
-    #compose-container {
-        width: 80%;
-        height: 80%;
-        padding: 2;
-        background: $panel;
-        border: thick $primary;
-    }
-    #compose-header {
-        width: 100%;
-        text-align: center;
-        padding-bottom: 1;
-    }
-    #compose-body {
-        height: 1fr;
-        width: 1fr;
-    }
-    #compose-buttons {
-        width: 100%;
-        margin-top: 1;
-    }
-    """
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="compose-container"):
-            yield Static("✍️ Compose New Email", id="compose-header")
-            yield Input(placeholder="To:", id="compose-to")
-            yield Input(placeholder="Subject:", id="compose-subject")
-            yield TextArea(placeholder="Body:", id="compose-body")
-            with Horizontal(id="compose-buttons"):
-                yield Button("Send", variant="primary", id="send-button")
-                yield Button("Cancel", id="cancel-button")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "send-button":
-            self.app.pop_screen()
-            self.app.update_status("📧 Email sent (dummy action)!")
-        elif event.button.id == "cancel-button":
-            self.app.pop_screen()
-
-class LoginModel(ModalScreen):
-    """A modal screen for user login."""
-
-    DEFAULT_CSS = """
-    LoginModel {
-        align: center middle;
-    }
-
-    #login-container {
-        width: 50%;
-        height: auto;
-        padding: 2;
-        background: $panel;
-        border: thick $primary;
-    }
-
-    #login-title {
-        width: 100%;
-        text-align: center;
-        padding-bottom: 1;
-    }
-
-    #login-inputs {
-        padding: 1 0;
-    }
-    """
-    logo = r"""
-██╗███╗ ██╗██████╗  ██████╗ ██╗ ██╗ ███████╗
-██║████╗██║██╔══██╗██╔═══██╗██║ ██║ ██╔════╝
-██║██╔████║██████╔╝██║   ██║██║ ██║ ███████╗
-██║██║╚███║██╔══██╗██║   ██║██║ ██║ ╚════██║
-██║██║ ╚██║██████╔╝╚██████╔╝███████╗███████║
-╚═╝╚═╝  ╚═╝╚═════╝  ╚═════╝ ╚══════╝╚══════╝
-    """
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="login-container"):
-            yield Static(self.logo, id="login-title")
-            with Vertical(id="login-inputs"):
-                yield Input(placeholder="Email Address")
-                yield Input(placeholder="App Password", password=True)
-            yield Button("Login", variant="primary", id="login-button")
-            yield Button("Help", id="help-button")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "login-button":
-            # Dummy login logic
-            email = self.query_one("#login-inputs > Input:first-child").value
-            password = self.query_one("#login-inputs > Input:last-child").value
-            if email and password:
-                self.app.pop_screen()  # Dismiss login screen
-                # Start the email fetcher after successful login
-                if self.app.email_fetcher:
-                    self.app.email_fetcher.start()
-                else:
-                    self.app.update_status("Error: Email fetcher not initialized.")
-            else:
-                self.app.bell()  # Indicate invalid input

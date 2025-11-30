@@ -120,7 +120,7 @@ def fetch_emails(num_emails: int = 50, timeout: int = 15) -> List[EmailMessage]:
                 or "INVALID CREDENTIALS" in error_str
             ):
                 raise AuthError(
-                    "Invalid email or app password. Please check your .env file."
+                    "Invalid email or app password. "
                 )
             else:
                 raise AuthError(f"Login failed: {str(e)}")
