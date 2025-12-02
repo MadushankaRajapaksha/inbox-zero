@@ -13,8 +13,18 @@ import functools # Import functools
 
 from .core import fetch_emails, EmailMessage, AuthError, send_email
 from .notifyer import notify
-from .db import save_user_credentials
+from .db import save_user_credentials, clear_user_credentials
 
+
+class EmailSent(Message):
+    """Message to indicate that an email was sent successfully."""
+    pass
+
+class EmailSendFailed(Message):
+    """Message to indicate that an email failed to send."""
+    def __init__(self, error: Exception):
+        self.error = error
+        super().__init__()
 
 class EmailModal(ModalScreen):
     """A modal screen to display a single email."""
@@ -125,22 +135,21 @@ class ComposeModal(ModalScreen):
             self.app.update_status("📧 Sending email...")
             self.app.pop_screen() # Close modal immediately
 
-            try:
-                # Use functools.partial to pass arguments to the worker
-                # Run the synchronous send_email in a thread to avoid blocking the UI
-                await self.app.run_worker(functools.partial(asyncio.to_thread, send_email, to_email=to_email, subject=subject, body=body))
-                self.app.update_status("✅ Email sent successfully!")
-            except AuthError as e:
-                self.app.update_status(f"🔐 Authentication failed: {str(e)}. Please check your login credentials.")
-                self.app.push_screen(LoginScreen()) # Offer to log in again
-            except Exception as e:
-                self.app.update_status(f"❌ Failed to send email: {str(e)}")
-                self.app.push_screen(SendErrorModal(f"Failed to send email: {str(e)}"))
+            # Run the email sending logic in a worker thread
+            self.app.run_send_email_worker(to_email, subject, body)
 
         elif event.button.id == "cancel-button":
             self.app.pop_screen()
             self.app.update_status("Compose cancelled.")
 
+
+    def send_email_worker(self, to_email: str, subject: str, body: str):
+        """A worker to send an email and post the result as a message."""
+        try:
+            send_email(to_email=to_email, subject=subject, body=body)
+            self.app.post_message(EmailSent())
+        except Exception as e:
+            self.app.post_message(EmailSendFailed(e))
 
 class SendErrorModal(ModalScreen):
     """A modal screen to display an email sending error."""
@@ -379,6 +388,9 @@ class InboxZeroApp(App):
     #compose-button {
         width: 1fr;
     }
+    #logout-button {
+        width: 1fr;
+    }
     """
 
     BINDINGS = [
@@ -411,6 +423,7 @@ class InboxZeroApp(App):
             with Horizontal(id="search-and-compose"):
                 yield Input(placeholder="Search emails...", id="search-input")
                 yield Button("Compose", variant="primary", id="compose-button")
+                yield Button("Logout", variant="error", id="logout-button")
 
         with Vertical(id="main-container"):
             email_table = DataTable(id="email-list", cursor_type="row")
@@ -621,11 +634,44 @@ class InboxZeroApp(App):
         """Handle button presses."""
         if event.button.id == "compose-button":
             self.push_screen(ComposeModal())
+        elif event.button.id == "logout-button":
+            try:
+                clear_user_credentials()
+                self.app.push_screen(LoginScreen())
+                self.update_status("Logged out successfully.")
+            except Exception as e:
+                self.update_status(f"Error logging out: {str(e)}")
 
     def on_input_changed(self, event: Input.Changed) -> None:
         """Handle search input changes."""
         if event.input.id == "search-input":
             self.filter_emails(event.value)
+
+    def run_send_email_worker(self, to_email: str, subject: str, body: str):
+        """A worker to send an email and post the result as a message."""
+        # This function is now part of the main app
+        def worker():
+            try:
+                send_email(to_email=to_email, subject=subject, body=body)
+                self.post_message(EmailSent())
+            except Exception as e:
+                self.post_message(EmailSendFailed(e))
+
+        self.run_worker(worker, thread=True, name="send_email_worker", group="actions", exclusive=True)
+
+    def on_email_sent(self, message: EmailSent) -> None:
+        """Handle successful email sending."""
+        self.update_status("✅ Email sent successfully!")
+
+    def on_email_send_failed(self, message: EmailSendFailed) -> None:
+        """Handle failed email sending."""
+        error = message.error
+        if isinstance(error, AuthError):
+            self.update_status(f"🔐 Authentication failed: {str(error)}. Please check your login credentials.")
+            self.push_screen(LoginScreen())
+        else:
+            self.update_status(f"❌ Failed to send email: {str(error)}")
+            self.push_screen(SendErrorModal(f"Failed to send email: {str(error)}"))
 
     def filter_emails(self, search_term: str) -> None:
         """Filter the displayed emails based on the search term."""

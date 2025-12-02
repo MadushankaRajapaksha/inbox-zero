@@ -23,14 +23,31 @@ def init_db():
         """)
         conn.commit()
 
+
+def clear_user_credentials():
+    """Deletes all user credentials from the database."""
+    with _get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM users")
+        conn.commit()
+
+
 def save_user_credentials(email: str, app_password: str):
     """Saves or updates user credentials in the database."""
     with _get_db_connection() as conn:
         cursor = conn.cursor()
+        # Attempt to update existing record
         cursor.execute("""
-            INSERT OR REPLACE INTO users (email, app_password)
-            VALUES (?, ?)
+            UPDATE users SET email = ?, app_password = ?
         """, (email, app_password))
+        
+        # If no rows were updated, insert a new one
+        if cursor.rowcount == 0:
+            cursor.execute("""
+                INSERT INTO users (email, app_password)
+                VALUES (?, ?)
+            """, (email, app_password))
+        
         conn.commit()
 
 def get_user_credentials() -> Optional[Tuple[str, str]]:
@@ -62,6 +79,8 @@ if __name__ == "__main__":
     # Update credentials
     save_user_credentials("new_test@example.com", "new_app_password")
     print("Credentials updated.")
+
+    
 
     creds = get_user_credentials()
     if creds:
