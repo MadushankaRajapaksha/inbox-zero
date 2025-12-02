@@ -1,17 +1,17 @@
-import os
 import imaplib
+import smtplib
 import email
 from email.header import decode_header
-from email.message import Message
+from email.message import EmailMessage as StdlibEmailMessage
 from email.utils import parsedate_to_datetime
+from email.mime.text import MIMEText
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Optional
-from dotenv import load_dotenv
+from typing import List, Optional, Tuple
 import socket
 import re
 
-load_dotenv()
+from .db import get_user_credentials, save_user_credentials, init_db
 
 
 class AuthError(Exception):
@@ -49,7 +49,7 @@ def _decode_header_value(value: Optional[str]) -> str:
         return str(value)
 
 
-def _get_email_body(msg: Message) -> str:
+def _get_email_body(msg: StdlibEmailMessage) -> str:
     """Extract plain text body from email message."""
     body = ""
     try:
@@ -96,11 +96,11 @@ def fetch_emails(num_emails: int = 50, timeout: int = 15) -> List[EmailMessage]:
         AuthError: If authentication fails
         Exception: For other errors with descriptive messages
     """
-    EMAIL = os.getenv("EMAIL")
-    APP_PASSWORD = os.getenv("APP_PASSWORD")
-
-    if not EMAIL or not APP_PASSWORD:
-        raise AuthError("EMAIL and APP_PASSWORD must be set in .env file")
+    credentials = get_user_credentials()
+    if not credentials:
+        raise AuthError("No user credentials found. Please log in.")
+    
+    EMAIL, APP_PASSWORD = credentials
 
     emails: List[EmailMessage] = []
     imap = None
@@ -280,3 +280,44 @@ if __name__ == "__main__":
             print(f"  Unread: {email.unread}")
     except Exception as e:
         print(f"Error: {e}")
+
+
+def send_email(to_email: str, subject: str, body: str) -> None:
+    """
+    Sends an email using the user's configured SMTP credentials.
+
+    Args:
+        to_email: The recipient's email address.
+        subject: The subject of the email.
+        body: The plain text body of the email.
+
+    Raises:
+        AuthError: If authentication fails.
+        Exception: For other errors during email sending.
+    """
+    credentials = get_user_credentials()
+    if not credentials:
+        raise AuthError("No user credentials found. Please log in to send emails.")
+
+    from_email, app_password = credentials
+
+    try:
+        # Create the email message
+        msg = MIMEText(body, "plain", "utf-8")
+        msg["Subject"] = subject
+        msg["From"] = from_email
+        msg["To"] = to_email
+        msg["Date"] = datetime.now().strftime("%a, %d %b %Y %H:%M:%S %z")
+
+        # Connect to SMTP server
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.login(from_email, app_password)
+            smtp.send_message(msg)
+    except smtplib.SMTPAuthenticationError as e:
+        raise AuthError(
+            f"SMTP authentication failed. Check your email and app password. Original error: {e}"
+        )
+    except smtplib.SMTPException as e:
+        raise Exception(f"SMTP error occurred: {e}")
+    except Exception as e:
+        raise Exception(f"An unexpected error occurred while sending email: {e}")

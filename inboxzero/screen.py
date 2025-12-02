@@ -9,9 +9,11 @@ from rich.text import Text
 from datetime import datetime
 import asyncio
 from typing import List, Optional, Set
+import functools # Import functools
 
-from .core import fetch_emails, EmailMessage, AuthError
+from .core import fetch_emails, EmailMessage, AuthError, send_email
 from .notifyer import notify
+from .db import save_user_credentials
 
 
 class EmailModal(ModalScreen):
@@ -100,11 +102,86 @@ class ComposeModal(ModalScreen):
                     yield Button("Send", variant="primary", id="send-button")
                     yield Button("Cancel", id="cancel-button")
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "send-button":
-            self.app.pop_screen()
-            self.app.update_status("📧 Email sent (dummy action)!")
+            to_input = self.query_one("#compose-to", Input)
+            subject_input = self.query_one("#compose-subject", Input)
+            body_textarea = self.query_one("#compose-body", TextArea)
+
+            to_email = to_input.value.strip()
+            subject = subject_input.value.strip()
+            body = body_textarea.text.strip()
+
+            # Basic validation
+            if not to_email:
+                self.app.update_status("❌ Recipient email cannot be empty.")
+                return
+            if "@" not in to_email or "." not in to_email:
+                self.app.update_status("❌ Please enter a valid recipient email address.")
+                return
+            
+            # Subject can be empty, body can be empty.
+
+            self.app.update_status("📧 Sending email...")
+            self.app.pop_screen() # Close modal immediately
+
+            try:
+                # Use functools.partial to pass arguments to the worker
+                # Run the synchronous send_email in a thread to avoid blocking the UI
+                await self.app.run_worker(functools.partial(asyncio.to_thread, send_email, to_email=to_email, subject=subject, body=body))
+                self.app.update_status("✅ Email sent successfully!")
+            except AuthError as e:
+                self.app.update_status(f"🔐 Authentication failed: {str(e)}. Please check your login credentials.")
+                self.app.push_screen(LoginScreen()) # Offer to log in again
+            except Exception as e:
+                self.app.update_status(f"❌ Failed to send email: {str(e)}")
+                self.app.push_screen(SendErrorModal(f"Failed to send email: {str(e)}"))
+
         elif event.button.id == "cancel-button":
+            self.app.pop_screen()
+            self.app.update_status("Compose cancelled.")
+
+
+class SendErrorModal(ModalScreen):
+    """A modal screen to display an email sending error."""
+
+    def __init__(self, error_message: str, **kwargs):
+        super().__init__(**kwargs)
+        self.error_message = error_message
+
+    DEFAULT_CSS = """
+    SendErrorModal {
+        align: center middle;
+    }
+    #error-container {
+        width: 50%;
+        height: auto;
+        padding: 2;
+        background: $error;
+        border: thick $error-darken-2;
+    }
+    #error-title {
+        width: 100%;
+        text-align: center;
+        padding-bottom: 1;
+    }
+    #error-message {
+        text-align: center;
+    }
+    #dismiss-button {
+        width: 100%;
+        margin-top: 1;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="error-container"):
+            yield Static("❌ Email Send Error", id="error-title")
+            yield Static(self.error_message, id="error-message")
+            yield Button("Dismiss", variant="primary", id="dismiss-button")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "dismiss-button":
             self.app.pop_screen()
 
 
@@ -224,10 +301,22 @@ class LoginScreen(Screen):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "login-button":
-            # Here you would typically handle the login logic,
-            # for now, we just restart the fetch loop.
-            self.app.pop_screen()
-            self.app.action_refresh()
+            email_input = self.query_one("#email-input", Input)
+            password_input = self.query_one("#password-input", Input)
+            
+            email = email_input.value
+            app_password = password_input.value
+
+            if email and app_password:
+                try:
+                    save_user_credentials(email, app_password)
+                    self.app.pop_screen()
+                    self.app.action_refresh()
+                    self.app.update_status("Login successful. Fetching emails...")
+                except Exception as e:
+                    self.app.update_status(f"Error saving credentials: {str(e)}")
+            else:
+                self.app.update_status("Please enter both email and app password.")
         elif event.button.id == "quit-button":
             self.app.exit()
 
@@ -307,7 +396,8 @@ class InboxZeroApp(App):
 
     def __init__(self):
         super().__init__()
-        self.emails: List[EmailMessage] = []
+        self.all_emails: List[EmailMessage] = [] # Master list of all fetched emails
+        self.displayed_emails: List[EmailMessage] = [] # Emails currently shown in the table (filtered or all)
         self.current_selection: Optional[int] = None
         self.is_loading = False
         self.notified_uids: Set[int] = set()
@@ -369,7 +459,7 @@ class InboxZeroApp(App):
                 return
 
             # Detect new emails for notifications
-            previous_uids = {email.uid for email in self.emails}
+            previous_uids = {email.uid for email in self.all_emails} # Use all_emails for previous UIDs
             new_emails = [
                 e for e in current_emails if e.uid not in previous_uids and e.unread
             ]
@@ -378,13 +468,16 @@ class InboxZeroApp(App):
             if new_emails and previous_uids:  # Only notify if not initial load
                 self._send_notifications(new_emails)
 
+            self.all_emails = current_emails # Update master list
+            self.displayed_emails = current_emails # Initially, display all emails
+
             # Update the table with all current emails
-            self.update_table(current_emails)
+            self.update_table() # Call without argument, it will use self.displayed_emails
 
             # Update status bar
-            unread_count = sum(1 for e in current_emails if e.unread)
+            unread_count = sum(1 for e in self.all_emails if e.unread) # Use all_emails for count
             self.update_status(
-                f"📬 {len(current_emails)} emails ({unread_count} unread)"
+                f"📬 {len(self.all_emails)} emails ({unread_count} unread)" # Use all_emails for count
             )
 
         except AuthError as e:
@@ -421,7 +514,7 @@ class InboxZeroApp(App):
         except Exception as e:
             self.log.error(f"Notification error: {e}")
 
-    def update_table(self, emails_to_display: List[EmailMessage]):
+    def update_table(self):
         """Update the email table efficiently."""
         table = self.query_one("#email-list", DataTable)
 
@@ -429,23 +522,20 @@ class InboxZeroApp(App):
         current_selection_uid = self.current_selection
         current_row_index = -1
 
-        if self.emails and current_selection_uid is not None:
-            for i, email_msg in enumerate(self.emails):
+        if self.displayed_emails and current_selection_uid is not None:
+            for i, email_msg in enumerate(self.displayed_emails):
                 if email_msg.uid == current_selection_uid:
                     current_row_index = i
                     break
 
-        # Update internal email list
-        self.emails = emails_to_display
-
         # Clear and rebuild table
         table.clear()
 
-        if not self.emails:
+        if not self.displayed_emails:
             # Show empty state
             table.add_row("📭", "No emails found", "", "", key="no_emails")
         else:
-            for email_msg in self.emails:
+            for email_msg in self.displayed_emails:
                 icon = "🔵" if email_msg.unread else "⚪"
                 from_field = email_msg.sender.split("<")[0].strip()[:30]
                 subject = (
@@ -459,7 +549,7 @@ class InboxZeroApp(App):
             # Restore cursor position
             if current_selection_uid is not None:
                 new_row_index = -1
-                for i, email_msg in enumerate(self.emails):
+                for i, email_msg in enumerate(self.displayed_emails):
                     if email_msg.uid == current_selection_uid:
                         new_row_index = i
                         break
@@ -473,7 +563,7 @@ class InboxZeroApp(App):
                 table.move_cursor(row=0)
 
         # Focus table
-        if self.emails and not table.has_focus:
+        if self.displayed_emails and not table.has_focus:
             table.focus()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected):
@@ -486,21 +576,27 @@ class InboxZeroApp(App):
 
         self.current_selection = int(row_key_value)
         selected_email = next(
-            (e for e in self.emails if e.uid == self.current_selection), None
+            (e for e in self.displayed_emails if e.uid == self.current_selection), None
         )
 
         if selected_email:
             preview = f"From: {selected_email.sender.split('<')[0].strip()} | Subject: {selected_email.subject[:40]}"
             self.update_status(preview)
+            # Only push the EmailModal if it's not already mounted, to prevent multiple modals
+            if not any(isinstance(screen, EmailModal) for screen in self.app.screen_stack): # Check if any EmailModal is active
+                self.push_screen(EmailModal(selected_email))
+        else:
+            self.update_status("❌ No email selected")
 
     def action_open_email(self) -> None:
-        """Opens the selected email in a modal view."""
+        """Opens the selected email in a modal view (triggered by 'Enter' key)."""
         if self.current_selection is not None:
             selected_email = next(
-                (e for e in self.emails if e.uid == self.current_selection), None
+                (e for e in self.displayed_emails if e.uid == self.current_selection), None
             )
             if selected_email:
-                self.push_screen(EmailModal(selected_email))
+                if not any(isinstance(screen, EmailModal) for screen in self.app.screen_stack): # Prevent opening multiple modals
+                    self.push_screen(EmailModal(selected_email))
             else:
                 self.update_status("❌ No email selected")
         else:
@@ -526,4 +622,26 @@ class InboxZeroApp(App):
         if event.button.id == "compose-button":
             self.push_screen(ComposeModal())
 
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Handle search input changes."""
+        if event.input.id == "search-input":
+            self.filter_emails(event.value)
+
+    def filter_emails(self, search_term: str) -> None:
+        """Filter the displayed emails based on the search term."""
+        if not search_term:
+            self.displayed_emails = self.all_emails  # Show all emails if search is empty
+        else:
+            filtered_emails = []
+            for email_msg in self.all_emails: # Filter from the master list
+                # Search in sender, subject, and body (case-insensitive)
+                if (
+                    search_term.lower() in email_msg.sender.lower()
+                    or search_term.lower() in email_msg.subject.lower()
+                    or search_term.lower() in email_msg.body.lower()
+                ):
+                    filtered_emails.append(email_msg)
+            self.displayed_emails = filtered_emails
+        
+        self.update_table() # Now calls update_table without arguments
 
